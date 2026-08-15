@@ -1,0 +1,13 @@
+node_modules
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+dist
+.vscode
+.idea
+*.log
+backend/static/reports/*.pdf

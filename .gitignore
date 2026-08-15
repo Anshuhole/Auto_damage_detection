@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Database & Uploads
+*.db
+backend/static/uploads/*
+!backend/static/uploads/.gitkeep
+backend/static/gradcam/*
+!backend/static/gradcam/.gitkeep
+backend/static/reports/*
+!backend/static/reports/.gitkeep
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+*.zip
+
