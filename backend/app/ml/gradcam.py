@@ -32,25 +32,32 @@ def strip_letterbox(img_bgr: np.ndarray) -> Tuple[np.ndarray, int, int, int, int
 
 class PrecisionGradCAM:
     """
-    Robust Vehicle-Centric Grad-CAM++ with Zero False Positives on Clean Cars.
+    High-Resolution Multi-Scale Grad-CAM++ Engine.
+    Fuses Layer 3 (fine-grained spatial textures, scratches, cracks)
+    and Layer 4 (high-level semantic damage representation) for comprehensive damage localization.
     """
-    def __init__(self, model: torch.nn.Module, target_layer: torch.nn.Module):
+    def __init__(self, model: torch.nn.Module, target_layer: Optional[torch.nn.Module] = None):
         self.model = model
-        self.target_layer = target_layer
-        self.gradients: Optional[torch.Tensor] = None
-        self.activations: Optional[torch.Tensor] = None
+        self.layer4 = model.backbone.layer4[-1] if hasattr(model, "backbone") else None
+        self.layer3 = model.backbone.layer3[-1] if hasattr(model, "backbone") else None
+        
+        self.acts = {}
+        self.grads = {}
         self.handles = []
         self._register_hooks()
 
     def _register_hooks(self):
-        def forward_hook(module, input, output):
-            self.activations = output.detach()
+        if self.layer3 is not None:
+            def f_hook3(m, i, o): self.acts['l3'] = o.detach()
+            def b_hook3(m, gi, go): self.grads['l3'] = go[0].detach()
+            self.handles.append(self.layer3.register_forward_hook(f_hook3))
+            self.handles.append(self.layer3.register_full_backward_hook(b_hook3))
 
-        def backward_hook(module, grad_input, grad_output):
-            self.gradients = grad_output[0].detach()
-
-        self.handles.append(self.target_layer.register_forward_hook(forward_hook))
-        self.handles.append(self.target_layer.register_full_backward_hook(backward_hook))
+        if self.layer4 is not None:
+            def f_hook4(m, i, o): self.acts['l4'] = o.detach()
+            def b_hook4(m, gi, go): self.grads['l4'] = go[0].detach()
+            self.handles.append(self.layer4.register_forward_hook(f_hook4))
+            self.handles.append(self.layer4.register_full_backward_hook(b_hook4))
 
     def generate_cam(
         self,
@@ -71,40 +78,50 @@ class PrecisionGradCAM:
         score_target = output[0, target_class]
         score_target.backward(retain_graph=True)
 
-        grads_target = self.gradients[0]
-        acts = self.activations[0]
+        cams = []
 
-        grads_2 = grads_target.pow(2)
-        grads_3 = grads_target.pow(3)
-        sum_acts = torch.sum(acts, dim=(1, 2), keepdim=True)
-        eps = 1e-7
+        # 1. Layer 4 Grad-CAM++ (Global Semantic Localization)
+        if 'l4' in self.grads and 'l4' in self.acts:
+            g4 = self.grads['l4'][0]
+            a4 = self.acts['l4'][0]
+            g4_2 = g4.pow(2)
+            g4_3 = g4.pow(3)
+            sum_a4 = a4.sum(dim=(1, 2), keepdim=True)
+            aij4 = g4_2 / (2 * g4_2 + sum_a4 * g4_3 + 1e-7)
+            w4 = (aij4 * F.relu(g4)).sum(dim=(1, 2), keepdim=True)
+            cam4 = (w4 * a4).sum(dim=0).clamp(min=0).cpu().numpy()
+            cam4_res = cv2.resize(cam4, (224, 224), interpolation=cv2.INTER_CUBIC)
+            if cam4_res.max() > cam4_res.min() + 1e-6:
+                cam4_n = (cam4_res - cam4_res.min()) / (cam4_res.max() - cam4_res.min())
+            else:
+                cam4_n = np.zeros((224, 224), dtype=np.float32)
+            cams.append((0.35, cam4_n))
 
-        aij = grads_2 / (2 * grads_2 + sum_acts * grads_3 + eps)
-        weights_target = torch.sum(aij * F.relu(grads_target), dim=(1, 2), keepdim=True)
+        # 2. Layer 3 Grad-CAM++ (Fine Spatial Scratches & Surface Defects)
+        if 'l3' in self.grads and 'l3' in self.acts:
+            g3 = self.grads['l3'][0]
+            a3 = self.acts['l3'][0]
+            g3_2 = g3.pow(2)
+            g3_3 = g3.pow(3)
+            sum_a3 = a3.sum(dim=(1, 2), keepdim=True)
+            aij3 = g3_2 / (2 * g3_2 + sum_a3 * g3_3 + 1e-7)
+            w3 = (aij3 * F.relu(g3)).sum(dim=(1, 2), keepdim=True)
+            cam3 = (w3 * a3).sum(dim=0).clamp(min=0).cpu().numpy()
+            cam3_res = cv2.resize(cam3, (224, 224), interpolation=cv2.INTER_CUBIC)
+            if cam3_res.max() > cam3_res.min() + 1e-6:
+                cam3_n = (cam3_res - cam3_res.min()) / (cam3_res.max() - cam3_res.min())
+            else:
+                cam3_n = np.zeros((224, 224), dtype=np.float32)
+            cams.append((0.65, cam3_n))
 
-        cam_target = torch.sum(weights_target * acts, dim=0).cpu().numpy()
-        cam_target = np.maximum(cam_target, 0)
-
-        # Contrast with clean class to suppress neutral vehicle body reflections
-        self.model.zero_grad()
-        score_clean = output[0, clean_class_idx]
-        score_clean.backward(retain_graph=True)
-
-        grads_clean = self.gradients[0]
-        weights_clean = torch.mean(F.relu(grads_clean), dim=(1, 2), keepdim=True)
-        cam_clean = torch.sum(weights_clean * acts, dim=0).cpu().numpy()
-        cam_clean = np.maximum(cam_clean, 0)
-
-        diff_cam = cam_target - (0.45 * cam_clean)
-        diff_cam = np.maximum(diff_cam, 0)
-
-        cam_max = np.max(diff_cam)
-        cam_min = np.min(diff_cam)
-
-        if cam_max > 1e-5 and (cam_max - cam_min) > 1e-5:
-            cam_norm = (diff_cam - cam_min) / (cam_max - cam_min)
+        if cams:
+            cam_fused = sum(w * c for w, c in cams)
+            if cam_fused.max() > cam_fused.min() + 1e-6:
+                cam_norm = (cam_fused - cam_fused.min()) / (cam_fused.max() - cam_fused.min())
+            else:
+                cam_norm = np.zeros((224, 224), dtype=np.float32)
         else:
-            cam_norm = np.zeros_like(diff_cam)
+            cam_norm = np.zeros((224, 224), dtype=np.float32)
 
         return cam_norm
 
@@ -122,11 +139,12 @@ def create_precision_overlay(
     confidence: float
 ) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, Any]]]:
     """
-    Overlays Grad-CAM heatmap and extracts exact compact bounding boxes.
+    Overlays Multi-Scale Grad-CAM++ heatmap fused with physical paint defect analysis
+    and extracts accurate, full-extent bounding boxes.
     Guarantees:
     - 0 bounding boxes on clean cars.
-    - Zero false red bleed on undamaged areas: suppresses background noise so heat only appears on the actual damage.
-    - Compact, snug bounding box targeted strictly on the core defect indentation.
+    - Suppresses tire/wheel treads and dark tarmac to keep heatmap on the vehicle body.
+    - Accurately encloses full damaged regions (scratches, dents, cracks, glass) across panels.
     """
     orig_h, orig_w = original_img_bgr.shape[:2]
 
@@ -135,115 +153,110 @@ def create_precision_overlay(
         blank_heatmap = np.zeros_like(original_img_bgr)
         return original_img_bgr.copy(), blank_heatmap, []
 
-    # 1. Strip letterboxing to work exclusively on the vehicle canvas
+    # 1. Strip letterbox padding
     crop, x_off, y_off, crop_w, crop_h = strip_letterbox(original_img_bgr)
     crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    crop_hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    _, s_ch, v_ch = cv2.split(crop_hsv)
 
-    # 2. Resize CAM to cropped vehicle region
-    cam_crop = cv2.resize(cam, (crop_w, crop_h), interpolation=cv2.INTER_CUBIC)
-    cam_crop = np.clip(cam_crop, 0.0, 1.0)
+    # 2. Vehicle Paint Mask with Tire / Wheel Suppression
+    is_tire = (s_ch < 55) & (v_ch < 95)
+    tire_dilated = cv2.dilate(is_tire.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+    paint_mask = (tire_dilated == 0).astype(np.float32)
 
-    # 3. Dynamic vehicle panel mask based on damage category
-    panel_mask = np.zeros((crop_h, crop_w), dtype=np.float32)
-    if damage_type == "shattered_glass":
-        panel_mask[int(crop_h * 0.05):int(crop_h * 0.70), int(crop_w * 0.10):int(crop_w * 0.90)] = 1.0
-    elif damage_type == "crack":
-        panel_mask[int(crop_h * 0.10):int(crop_h * 0.95), int(crop_w * 0.05):int(crop_w * 0.95)] = 1.0
+    margin_y = max(4, int(crop_h * 0.02))
+    margin_x = max(4, int(crop_w * 0.02))
+    paint_mask[:margin_y, :] = 0
+    paint_mask[-margin_y:, :] = 0
+    paint_mask[:, :margin_x] = 0
+    paint_mask[:, -margin_x:] = 0
+
+    # 3. Physical Defect Surface Map
+    k1 = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+    k2 = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
+    tophat = cv2.max(cv2.morphologyEx(crop_gray, cv2.MORPH_TOPHAT, k1), cv2.morphologyEx(crop_gray, cv2.MORPH_TOPHAT, k2))
+    blackhat = cv2.max(cv2.morphologyEx(crop_gray, cv2.MORPH_BLACKHAT, k1), cv2.morphologyEx(crop_gray, cv2.MORPH_BLACKHAT, k2))
+    scratch_raw = cv2.max(tophat, blackhat).astype(np.float32) / 255.0
+
+    blur_large = cv2.GaussianBlur(crop_gray, (45, 45), 0)
+    dent_raw = cv2.absdiff(crop_gray, blur_large).astype(np.float32) / 255.0
+
+    if damage_type == "scratch":
+        defect_map = (0.75 * scratch_raw + 0.25 * dent_raw) * paint_mask
     elif damage_type == "dent":
-        panel_mask[int(crop_h * 0.15):int(crop_h * 0.85), int(crop_w * 0.10):int(crop_w * 0.90)] = 1.0
+        defect_map = (0.30 * scratch_raw + 0.70 * dent_raw) * paint_mask
     else:
-        panel_mask[int(crop_h * 0.12):int(crop_h * 0.88), int(crop_w * 0.08):int(crop_w * 0.92)] = 1.0
+        defect_map = (0.50 * scratch_raw + 0.50 * dent_raw) * paint_mask
 
-    # 4. Physical surface curvature anomaly
-    blurred = cv2.GaussianBlur(crop_gray, (25, 25), 0)
-    surface_anomaly = np.abs(crop_gray.astype(np.float32) - blurred.astype(np.float32)) * panel_mask
-
-    max_anom = np.max(surface_anomaly)
-    min_anom = np.min(surface_anomaly)
-    if max_anom > min_anom + 1e-6:
-        surface_anomaly_norm = (surface_anomaly - min_anom) / (max_anom - min_anom)
+    defect_blur = cv2.GaussianBlur(defect_map, (15, 15), 0)
+    if defect_blur.max() > defect_blur.min() + 1e-6:
+        d_norm = (defect_blur - defect_blur.min()) / (defect_blur.max() - defect_blur.min())
     else:
-        surface_anomaly_norm = np.zeros_like(surface_anomaly)
+        d_norm = np.zeros_like(defect_blur)
 
-    # 5. Fuse neural Grad-CAM with surface defect anomaly
-    fused_saliency = (0.70 * cam_crop + 0.30 * surface_anomaly_norm) * panel_mask
-    max_sal = np.max(fused_saliency)
-    min_sal = np.min(fused_saliency)
-    if max_sal > min_sal + 1e-6:
-        fused_saliency = (fused_saliency - min_sal) / (max_sal - min_sal)
+    # 4. Neural CAM resize & normalization
+    cam_crop = cv2.resize(cam, (crop_w, crop_h), interpolation=cv2.INTER_CUBIC)
+    if cam_crop.max() > cam_crop.min() + 1e-6:
+        cam_norm = (cam_crop - cam_crop.min()) / (cam_crop.max() - cam_crop.min())
     else:
-        fused_saliency = np.zeros_like(fused_saliency)
+        cam_norm = np.zeros_like(cam_crop)
 
-    # Clean noise gate: suppress low-intensity background activations (< 0.28)
-    # This prevents undamaged vehicle areas from turning red/yellow
-    fused_saliency = np.clip((fused_saliency - 0.28) / (1.0 - 0.28), 0.0, 1.0)
-    fused_saliency = np.power(fused_saliency, 1.35)
+    # 5. Fuse Multi-Scale CAM with Physical Defect Surface Map
+    fused_saliency = (0.40 * cam_norm + 0.60 * d_norm) * paint_mask
+    fused_saliency = np.clip((fused_saliency - 0.16) / (1.0 - 0.16), 0.0, 1.0)
+    fused_saliency = np.power(fused_saliency, 1.15)
 
-    # Full canvas heatmap
+    # Map back to full original image canvas
     full_cam = np.zeros((orig_h, orig_w), dtype=np.float32)
     full_cam[y_off:y_off+crop_h, x_off:x_off+crop_w] = fused_saliency
-    full_cam = cv2.GaussianBlur(full_cam, (9, 9), 0)
+    full_cam = cv2.GaussianBlur(full_cam, (7, 7), 0)
 
     cam_uint8 = np.uint8(255 * full_cam)
     heatmap_bgr = cv2.applyColorMap(cam_uint8, cv2.COLORMAP_JET)
 
-    # Selective thermal alpha blend: ONLY blend where true heat is present (> 0.08)
-    # Undamaged areas have alpha=0, keeping normal paint completely pristine
-    alpha_mask = np.where(full_cam > 0.08, (full_cam ** 1.1) * 0.70, 0.0)[:, :, np.newaxis]
+    # Thermal alpha blend strictly where heat is present (> 0.05) - vivid thermal intensity
+    alpha_mask = np.where(full_cam > 0.05, np.clip((full_cam ** 0.82) * 0.92, 0.0, 1.0), 0.0)[:, :, np.newaxis]
     overlay_bgr = np.uint8(original_img_bgr * (1.0 - alpha_mask) + heatmap_bgr * alpha_mask)
 
-    # 6. Extract Small, Snug Bounding Box Focused Strictly on the Dent Epicenter
+    # 6. Extract Multi-Zone Full-Span Bounding Boxes
     bounding_boxes = []
+    crop_cam_uint8 = np.uint8(255 * fused_saliency)
+    active_pixels = crop_cam_uint8[crop_cam_uint8 > 20]
+    thresh_val = max(38, int(np.percentile(active_pixels, 35))) if len(active_pixels) > 0 else 45
+    _, thresh = cv2.threshold(crop_cam_uint8, thresh_val, 255, cv2.THRESH_BINARY)
 
-    crop_saliency_uint8 = np.uint8(255 * fused_saliency)
-    hotspot_pixels = crop_saliency_uint8[crop_saliency_uint8 > 40]
+    # Morphological closing to connect adjacent damage streaks into unified zones
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (29, 29))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel)
 
-    if damage_type == "dent":
-        thresh_val = int(np.percentile(hotspot_pixels, 82)) if len(hotspot_pixels) > 0 else 150
-        morph_size = (9, 9)
-        pad_ratio = 0.02
-    elif damage_type == "scratch":
-        thresh_val = int(np.percentile(hotspot_pixels, 75)) if len(hotspot_pixels) > 0 else 135
-        morph_size = (9, 9)
-        pad_ratio = 0.02
-    else:
-        thresh_val = int(np.percentile(hotspot_pixels, 76)) if len(hotspot_pixels) > 0 else 140
-        morph_size = (11, 11)
-        pad_ratio = 0.02
-
-    _, thresh = cv2.threshold(crop_saliency_uint8, max(110, thresh_val), 255, cv2.THRESH_BINARY)
-
-    # Morphological closing
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, morph_size)
-    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-
-    contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     crop_area = crop_w * crop_h
 
-    if contours:
-        cnt = contours[0]  # The primary focal damage location
+    valid_boxes = []
+    for cnt in contours:
         area = cv2.contourArea(cnt)
-        if (crop_area * 0.005) < area < (crop_area * 0.55):
+        if area > (crop_area * 0.015):
             x, y, w, h = cv2.boundingRect(cnt)
+            valid_boxes.append((x, y, w, h, area))
 
+    if valid_boxes:
+        valid_boxes = sorted(valid_boxes, key=lambda b: b[4], reverse=True)
+        # Capture up to 2 distinct damage zones (e.g. primary scratch field + secondary dent)
+        for x, y, w, h, area in valid_boxes[:2]:
             bx_orig = x_off + x
             by_orig = y_off + y
             bw_orig = w
             bh_orig = h
 
-            # Snug compact padding
-            pad_x = int(bw_orig * pad_ratio)
-            pad_y = int(bh_orig * pad_ratio)
+            pad_x = int(bw_orig * 0.03)
+            pad_y = int(bh_orig * 0.03)
             final_x = max(0, bx_orig - pad_x)
             final_y = max(0, by_orig - pad_y)
             final_w = min(orig_w - final_x, bw_orig + 2 * pad_x)
             final_h = min(orig_h - final_y, bh_orig + 2 * pad_y)
 
-            mask_roi = full_cam[final_y:final_y+final_h, final_x:final_x+final_w]
-            roi_conf = float(np.mean(mask_roi)) if mask_roi.size > 0 else 0.88
+            roi_mask = full_cam[final_y:final_y+final_h, final_x:final_x+final_w]
+            roi_conf = float(np.mean(roi_mask[roi_mask > 0])) if np.any(roi_mask > 0) else 0.85
 
             bounding_boxes.append({
                 "x": round(float(final_x) / orig_w, 4),
@@ -251,7 +264,7 @@ def create_precision_overlay(
                 "width": round(float(final_w) / orig_w, 4),
                 "height": round(float(final_h) / orig_h, 4),
                 "label": f"{damage_type.replace('_', ' ').title()} Zone",
-                "confidence": round(min(0.98, max(0.75, roi_conf * 1.25)), 3)
+                "confidence": round(min(0.98, max(0.82, confidence)), 3)
             })
 
     return overlay_bgr, heatmap_bgr, bounding_boxes

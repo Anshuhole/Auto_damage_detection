@@ -3,7 +3,15 @@ from pathlib import Path
 
 # Base Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-STATIC_DIR = BASE_DIR / "static"
+IS_VERCEL = bool(os.environ.get("VERCEL"))
+
+if IS_VERCEL:
+    STATIC_DIR = Path("/tmp/static")
+    DATABASE_URL = "sqlite:////tmp/autoinspect.db"
+else:
+    STATIC_DIR = BASE_DIR / "static"
+    DATABASE_URL = f"sqlite:///{BASE_DIR}/autoinspect.db"
+
 UPLOAD_DIR = STATIC_DIR / "uploads"
 GRADCAM_DIR = STATIC_DIR / "gradcam"
 REPORT_DIR = STATIC_DIR / "reports"
@@ -11,9 +19,6 @@ WEIGHTS_DIR = BASE_DIR / "app" / "ml" / "weights"
 
 for folder in [STATIC_DIR, UPLOAD_DIR, GRADCAM_DIR, REPORT_DIR, WEIGHTS_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
-
-# Database
-DATABASE_URL = f"sqlite:///{BASE_DIR}/autoinspect.db"
 
 # Model Configuration
 MODEL_NAME = "resnet50"

@@ -65,48 +65,80 @@ class DamageClassifierNet(nn.Module):
         return damage_logits, severity_logits
 
 
-def analyze_vehicle_visual_features(cv_img_bgr: np.ndarray) -> Dict[str, float]:
+def analyze_vehicle_visual_features(cv_img_bgr: np.ndarray) -> Dict[str, Any]:
     """
-    Extracts geometric, edge, texture, and shadow curvature signatures from the vehicle canvas.
+    Comprehensive physical surface defect analysis for automotive damage inspection.
+    Extracts high-resolution scratch abrasions, dent curvature deformations, crack edges,
+    and glass fracture patterns with tire/wheel suppression.
     """
     crop, _, _, cw, ch = strip_letterbox(cv_img_bgr)
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    _, s_ch, v_ch = cv2.split(hsv)
 
-    # 1. Body panel anomaly
-    panel_mask = np.zeros((ch, cw), dtype=np.float32)
-    panel_mask[int(ch * 0.15):int(ch * 0.85), int(cw * 0.08):int(cw * 0.92)] = 1.0
+    # 1. Non-paint suppression (tires, wheels, dark pavement)
+    tire_wheel_mask = (s_ch < 55) & (v_ch < 95)
+    tire_dilated = cv2.dilate(tire_wheel_mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+    paint_mask = (tire_dilated == 0).astype(np.float32)
 
-    blurred = cv2.GaussianBlur(gray, (35, 35), 0)
-    diff = np.abs(gray.astype(np.float32) - blurred.astype(np.float32)) * panel_mask
-    valid_diff = diff[panel_mask > 0]
-    anomaly_peak = float(np.percentile(valid_diff, 98)) if len(valid_diff) > 0 else 0.0
-    anomaly_density = float(np.mean(valid_diff > 35.0)) if len(valid_diff) > 0 else 0.0
+    margin_y = max(4, int(ch * 0.02))
+    margin_x = max(4, int(cw * 0.02))
+    paint_mask[:margin_y, :] = 0
+    paint_mask[-margin_y:, :] = 0
+    paint_mask[:, :margin_x] = 0
+    paint_mask[:, -margin_x:] = 0
 
-    # 2. Line detection
-    edges = cv2.Canny(gray, 75, 185)
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=45, minLineLength=30, maxLineGap=8)
-    line_count = len(lines) if lines is not None else 0
+    # 2. Scratch & Paint Abrasion Energy (Multi-scale TopHat & BlackHat)
+    k_small = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+    k_med = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
 
-    # 3. Cabin windshield fracture detection
-    cabin_edges = edges[int(ch * 0.15):int(ch * 0.50), int(cw * 0.25):int(cw * 0.75)]
-    cabin_fracture_density = float(np.mean(cabin_edges > 0)) if cabin_edges.size > 0 else 0.0
+    tophat = cv2.max(cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_small), cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_med))
+    blackhat = cv2.max(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_small), cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_med))
+    scratch_raw = cv2.max(tophat, blackhat).astype(np.float32)
+    scratch_map = scratch_raw * paint_mask
 
-    # 4. Bumper fracture density
-    bumper_edges = edges[int(ch * 0.65):, :]
-    bumper_density = float(np.mean(bumper_edges > 0)) if bumper_edges.size > 0 else 0.0
+    # 3. High-frequency paint edges
+    edges = cv2.Canny(gray, 45, 140)
+    edges_paint = edges * paint_mask.astype(np.uint8)
+
+    # 4. Dent & Body Crease Deformation Energy
+    blur_large = cv2.GaussianBlur(gray, (45, 45), 0)
+    dent_raw = cv2.absdiff(gray, blur_large).astype(np.float32)
+    dent_map = dent_raw * paint_mask
+
+    # 5. Windshield & Window Glass Fracture Mesh
+    cabin_region = gray[int(ch * 0.10):int(ch * 0.50), int(cw * 0.20):int(cw * 0.80)]
+    cabin_edges = cv2.Canny(cabin_region, 80, 200) if cabin_region.size > 0 else np.zeros((1, 1))
+    glass_density = float(np.mean(cabin_edges > 0))
+
+    paint_area = float(np.sum(paint_mask > 0)) + 1e-5
+
+    scratch_energy = float(np.sum(scratch_map > 22.0) / paint_area)
+    scratch_peak = float(np.percentile(scratch_map[paint_mask > 0], 98)) if np.any(paint_mask > 0) else 0.0
+
+    dent_energy = float(np.sum(dent_map > 30.0) / paint_area)
+    dent_peak = float(np.percentile(dent_map[paint_mask > 0], 98)) if np.any(paint_mask > 0) else 0.0
+
+    edge_density = float(np.sum(edges_paint > 0) / paint_area)
 
     return {
-        "anomaly_peak": anomaly_peak,
-        "anomaly_density": anomaly_density,
-        "line_count": line_count,
-        "cabin_fracture_density": cabin_fracture_density,
-        "bumper_density": bumper_density
+        "scratch_energy": scratch_energy,
+        "scratch_peak": scratch_peak,
+        "dent_energy": dent_energy,
+        "dent_peak": dent_peak,
+        "edge_density": edge_density,
+        "glass_density": glass_density,
+        "scratch_raw": scratch_raw / 255.0,
+        "dent_raw": dent_raw / 255.0,
+        "paint_mask": paint_mask
     }
 
 
 class VehicleDamagePredictor:
     """
-    High-Precision Visual-Neural Inference Engine & Differential Grad-CAM++ Pipeline.
+    High-Precision Visual-Neural Inference Engine & Multi-Scale Grad-CAM++ Pipeline.
+    Combines ResNet50 deep representations with physical surface defect profiling
+    for reliable detection across all real-world automotive imagery.
     """
     def __init__(self, weights_path: Optional[str] = None, device: str = DEVICE):
         self.device = torch.device(device if torch.cuda.is_available() and device == "cuda" else "cpu")
@@ -130,11 +162,7 @@ class VehicleDamagePredictor:
         self.model.to(self.device)
         self.model.eval()
 
-        self.target_layer = self.model.backbone.layer4[-1]
-        self.gradcam = PrecisionGradCAM(
-            model=self.model,
-            target_layer=self.target_layer
-        )
+        self.gradcam = PrecisionGradCAM(model=self.model)
 
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -147,7 +175,7 @@ class VehicleDamagePredictor:
 
     def predict(self, pil_image: Image.Image, filename: str = "") -> Dict[str, Any]:
         """
-        Executes precision damage detection, Grad-CAM++ localization, and cost calculation.
+        Executes precision damage detection, Multi-Scale Grad-CAM++ localization, and cost calculation.
         """
         if pil_image.mode != "RGB":
             pil_image = pil_image.convert("RGB")
@@ -164,15 +192,16 @@ class VehicleDamagePredictor:
             nn_dmg_probs = F.softmax(dmg_logits, dim=1)[0].detach().cpu().numpy()
             nn_sev_probs = F.softmax(sev_logits, dim=1)[0].detach().cpu().numpy()
 
-        # 2. Visual Feature Analysis
+        # 2. Comprehensive Visual Surface Defect Analysis
         feat = analyze_vehicle_visual_features(cv_img_bgr)
-        anomaly_density = feat["anomaly_density"]
-        anomaly_peak = feat["anomaly_peak"]
-        line_count = feat["line_count"]
-        cabin_fracture_density = feat["cabin_fracture_density"]
-        bumper_density = feat["bumper_density"]
+        scratch_energy = feat["scratch_energy"]
+        scratch_peak = feat["scratch_peak"]
+        dent_energy = feat["dent_energy"]
+        dent_peak = feat["dent_peak"]
+        edge_density = feat["edge_density"]
+        glass_density = feat["glass_density"]
 
-        fn_lower = filename.lower()
+        nn_clean_prob = float(nn_dmg_probs[4])
 
         scores = {
             "scratch": 0.02,
@@ -182,19 +211,39 @@ class VehicleDamagePredictor:
             "no_damage": 0.02
         }
 
-        # 3. High-Precision Discrimination
-        if nn_dmg_probs[4] > 0.65 or "clean" in fn_lower or "whole" in fn_lower:
+        # 3. Multi-Modal Defect Classification (Deep Learning + Physics-Grounded Metrics)
+        # 3.1 Clean Vehicle Gate
+        if nn_clean_prob > 0.60 and scratch_energy < 0.08:
+            scores["no_damage"] = 0.95
+        elif nn_clean_prob > 0.85:
             scores["no_damage"] = 0.96
-        elif "crack" in fn_lower or bumper_density > 0.13:
-            scores["crack"] = 0.94
-        elif "glass" in fn_lower or "windshield" in fn_lower or (cabin_fracture_density > 0.22 and line_count > 25):
-            scores["shattered_glass"] = 0.94
-        elif "scratch" in fn_lower or (line_count >= 40 and anomaly_peak < 72.0):
-            scores["scratch"] = 0.93
-        elif anomaly_density > 0.08 or anomaly_peak >= 70.0 or nn_dmg_probs[1] > 0.35:
-            scores["dent"] = 0.95
+        # 3.2 Shattered Glass
+        elif nn_dmg_probs[3] > 0.60 or (glass_density > 0.22 and edge_density > 0.08):
+            scores["shattered_glass"] = 0.92
+            scores["crack"] = 0.06
+        # 3.3 Scratch / Paint Scrapes (high scratch energy & multi-scale tophat streaks)
+        elif scratch_energy > 0.15 or (scratch_energy > 0.05 and scratch_peak > 55.0):
+            scores["scratch"] = 0.88 + min(0.08, scratch_energy)
+            scores["dent"] = 0.10 + min(0.20, dent_energy)
+        # 3.4 Dent / Panel Deformation (smooth curvature gradients & shadow transitions)
+        elif dent_energy > 0.12 or dent_peak > 65.0:
+            scores["dent"] = 0.88 + min(0.08, dent_energy)
+            scores["scratch"] = 0.10 + min(0.20, scratch_energy)
+        # 3.5 Crack / Structural Fracture
+        elif edge_density > 0.07:
+            scores["crack"] = 0.85
+            scores["scratch"] = 0.08
         else:
-            scores["no_damage"] = 0.92
+            # Neural-dominant fallback
+            if nn_dmg_probs[1] > 0.40:
+                scores["dent"] = 0.80
+                scores["scratch"] = 0.12
+            elif nn_dmg_probs[0] > 0.20:
+                scores["scratch"] = 0.80
+                scores["dent"] = 0.12
+            else:
+                scores["scratch"] = 0.45
+                scores["dent"] = 0.45
 
         total_score = sum(scores.values())
         prob_dict = {k: round(v / total_score, 4) for k, v in scores.items()}
@@ -210,13 +259,13 @@ class VehicleDamagePredictor:
             pred_severity = "none"
         else:
             if pred_damage_type in ["shattered_glass", "dent"]:
-                pred_severity = "severe" if confidence > 0.85 else "moderate"
+                pred_severity = "severe" if (confidence > 0.85 or dent_energy > 0.25) else "moderate"
             elif pred_damage_type == "crack":
-                pred_severity = "moderate"
+                pred_severity = "severe" if edge_density > 0.15 else "moderate"
             else:  # scratch
-                pred_severity = "minor" if confidence < 0.88 else "moderate"
+                pred_severity = "minor" if scratch_energy < 0.25 else "moderate"
 
-        # 4. Grad-CAM Localization & Bounding Boxes
+        # 4. Multi-Scale Grad-CAM++ Localization & Full-Extent Bounding Boxes
         if has_damage:
             cam = self.gradcam.generate_cam(
                 input_tensor=input_tensor,

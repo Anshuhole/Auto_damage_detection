@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Eye, Sliders, Layers, Maximize2, SplitSquareHorizontal, CheckSquare, Square, CheckCircle2 } from 'lucide-react';
+import { Eye, Sliders, Layers, Maximize2, SplitSquareHorizontal, CheckSquare, Square, CheckCircle2, Flame } from 'lucide-react';
 
 export default function GradCamViewer({ 
   originalImageUrl, 
@@ -7,7 +7,7 @@ export default function GradCamViewer({
   boundingBoxes = [], 
   damageType 
 }) {
-  const [opacity, setOpacity] = useState(80); // 0% (Original) to 100% (Grad-CAM)
+  const [opacity, setOpacity] = useState(100); // Default 100% full thermal heat opacity
   const [viewMode, setViewMode] = useState('overlay'); // 'overlay' | 'side-by-side'
   const [showBoxes, setShowBoxes] = useState(true);
 
@@ -110,36 +110,62 @@ export default function GradCamViewer({
               )}
 
               {/* Overlay Indicator Badge */}
-              <div className="absolute bottom-3 left-3 bg-slate-950/85 backdrop-blur-md px-2.5 py-1 rounded-md border border-slate-700 text-[11px] font-mono text-slate-300">
+              <div className="absolute bottom-3 left-3 bg-slate-950/85 backdrop-blur-md px-2.5 py-1 rounded-md border border-slate-700 text-[11px] font-mono text-slate-300 flex items-center gap-1.5">
+                <Flame className="w-3 h-3 text-red-400" />
                 Opacity: <span className="text-cyan-400 font-bold">{opacity}%</span>
               </div>
             </div>
           </div>
 
-          {/* Interactive Opacity Slider */}
+          {/* Interactive Thermal Opacity Scrollbar / Slider */}
           {!isClean && (
-            <div className="space-y-1.5 pt-1">
-              <div className="flex justify-between text-xs text-slate-400 font-medium">
-                <span className="flex items-center gap-1">
-                  <Sliders className="w-3.5 h-3.5" /> Original Photo (0%)
+            <div className="space-y-2 pt-2 bg-slate-900/60 p-3 rounded-xl border border-slate-800/80">
+              <div className="flex items-center justify-between text-xs font-semibold">
+                <span className="flex items-center gap-1.5 text-slate-400">
+                  <Sliders className="w-3.5 h-3.5 text-slate-400" /> Original Paint (0%)
                 </span>
-                <span className="text-cyan-400 font-semibold">Grad-CAM Thermal Heatmap (100%)</span>
+                
+                {/* Preset Quick Buttons */}
+                <div className="flex items-center gap-1.5">
+                  {[25, 50, 75, 100].map((val) => (
+                    <button
+                      key={val}
+                      onClick={() => setOpacity(val)}
+                      className={`text-[10px] px-2 py-0.5 rounded font-mono transition-colors ${
+                        opacity === val 
+                          ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm' 
+                          : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700'
+                      }`}
+                    >
+                      {val}%
+                    </button>
+                  ))}
+                </div>
+
+                <span className="text-cyan-400 font-bold flex items-center gap-1.5">
+                  <Flame className="w-3.5 h-3.5 text-red-400" />
+                  Thermal Heat: <span className="font-mono text-white bg-slate-800 px-2 py-0.5 rounded border border-slate-700">{opacity}%</span>
+                </span>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={opacity}
-                onChange={(e) => setOpacity(Number(e.target.value))}
-                className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 focus:outline-none"
-              />
+
+              {/* Glowing Range Scrollbar */}
+              <div className="relative flex items-center pt-1">
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={opacity}
+                  onChange={(e) => setOpacity(Number(e.target.value))}
+                  className="w-full h-3 bg-gradient-to-r from-slate-800 via-sky-950 to-cyan-900 rounded-lg appearance-none cursor-pointer accent-cyan-400 focus:outline-none shadow-inner border border-slate-700/60"
+                />
+              </div>
             </div>
           )}
 
           {/* Heatmap Spectrum Legend */}
           <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
             <span>Low Activation (Normal Paint)</span>
-            <div className="h-2 w-32 rounded-full bg-gradient-to-r from-blue-600 via-yellow-400 to-red-600 mx-2" />
+            <div className="h-2 w-36 rounded-full bg-gradient-to-r from-blue-600 via-yellow-400 to-red-600 mx-2 shadow-sm" />
             <span className="text-red-400 font-medium">High Damage Anomaly</span>
           </div>
         </div>

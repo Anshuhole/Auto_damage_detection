@@ -1,4 +1,4 @@
-# Python
+# Python & Virtual Environments
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,14 +9,22 @@ venv/
 ENV/
 .venv/
 
-# Node
+# Node & Frontend Build
 node_modules/
 dist/
 dist-ssr/
 *.local
+.npm
+.vite/
 
-# Database & Uploads
-*.db
+# ML Training Datasets & Caches
+ml_training/data/
+ml_training/real_dataset/
+ml_training/kaggle_car_damage_dataset/
+ml_training/training_history.png
+ml_training/confusion_matrix.png
+
+# User Uploads & Generated Outputs
 backend/static/uploads/*
 !backend/static/uploads/.gitkeep
 backend/static/gradcam/*
@@ -24,11 +32,29 @@ backend/static/gradcam/*
 backend/static/reports/*
 !backend/static/reports/.gitkeep
 
-# IDE & OS
+# General Image Formats (Ignores all training/temp images)
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.tiff
+*.gif
+
+# Whitelist Essential Frontend UI Assets & Demo Presets
+!frontend/public/**/*
+!frontend/src/**/*
+
+# Database, Logs & Large Archives
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.zip
+*.tar.gz
+
+# IDE & Operating System Files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-*.log
-*.zip
-
