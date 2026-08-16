@@ -6,7 +6,7 @@ echo   Target: https://github.com/Anshuhole/Auto_damage_detection
 echo ========================================================
 echo.
 
-set "PATH=C:\Users\VISHNU\dev_tools\git\cmd;C:\Users\VISHNU\dev_tools\node-v20.18.0-win-x64;C:\Users\VISHNU\dev_tools\python311;%PATH%"
+set "PATH=C:\Program Files\Git\cmd;C:\Users\VISHNU\dev_tools\git\cmd;C:\Users\VISHNU\dev_tools\node-v20.18.0-win-x64;C:\Users\VISHNU\dev_tools\python311;%PATH%"
 
 git branch -M main
 git remote set-url origin https://github.com/Anshuhole/Auto_damage_detection.git
