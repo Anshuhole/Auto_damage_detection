@@ -10,8 +10,33 @@ export default function GradCamViewer({
   const [opacity, setOpacity] = useState(100); // Default 100% full thermal heat opacity
   const [viewMode, setViewMode] = useState('overlay'); // 'overlay' | 'side-by-side'
   const [showBoxes, setShowBoxes] = useState(true);
+  const [customHotspot, setCustomHotspot] = useState(null);
 
-  const isClean = damageType === 'no_damage' || boundingBoxes.length === 0;
+  const isClean = damageType === 'no_damage';
+
+  const handleImageClick = (e) => {
+    if (isClean) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.max(0.05, Math.min(0.95, (e.clientX - rect.left) / rect.width));
+    const y = Math.max(0.05, Math.min(0.95, (e.clientY - rect.top) / rect.height));
+
+    const w = 0.24;
+    const h = 0.22;
+    const boxX = Math.max(0.02, Math.min(0.98 - w, x - w / 2));
+    const boxY = Math.max(0.02, Math.min(0.98 - h, y - h / 2));
+
+    setCustomHotspot({
+      x: boxX,
+      y: boxY,
+      width: w,
+      height: h,
+      centerX: x,
+      centerY: y,
+      label: 'TARGETED DAMAGE ZONE'
+    });
+  };
+
+  const activeBoxes = customHotspot ? [customHotspot] : boundingBoxes;
 
   return (
     <div className="glass-card rounded-2xl p-5 border-slate-800 space-y-4">
@@ -20,7 +45,10 @@ export default function GradCamViewer({
       <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
         <div className="flex items-center gap-2">
           <Eye className="w-5 h-5 text-cyan-400" />
-          <h3 className="text-sm font-bold text-white">Visual Explainability (Grad-CAM Heatmap)</h3>
+          <div>
+            <h3 className="text-sm font-bold text-white">Visual Explainability (Grad-CAM Heatmap)</h3>
+            <p className="text-[11px] text-slate-400">Click anywhere on the photo to fine-tune damage targeting</p>
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -64,13 +92,17 @@ export default function GradCamViewer({
         <div className="space-y-3">
           {/* Overlay Viewport: Image-relative container to ensure pixel-perfect bounding box alignment */}
           <div className="rounded-xl overflow-hidden bg-slate-950 border border-slate-700 flex items-center justify-center p-1 min-h-[300px]">
-            <div className="relative inline-block max-w-full max-h-[500px]">
+            <div 
+              onClick={handleImageClick}
+              className="relative inline-block max-w-full max-h-[500px] cursor-crosshair select-none"
+              title="Click anywhere to pinpoint the damage zone"
+            >
               
               {/* Base: Original Image */}
               <img
                 src={originalImageUrl}
                 alt="Original Vehicle Photo"
-                className="block max-w-full max-h-[500px] w-auto h-auto rounded-lg object-contain"
+                className="block max-w-full max-h-[500px] w-auto h-auto rounded-lg object-contain pointer-events-none"
               />
 
               {/* Top: Grad-CAM Overlay with dynamic opacity */}
@@ -78,13 +110,30 @@ export default function GradCamViewer({
                 <img
                   src={gradcamImageUrl}
                   alt="Grad-CAM Activation Overlay"
-                  style={{ opacity: opacity / 100 }}
+                  style={{ 
+                    opacity: opacity / 100,
+                    filter: customHotspot ? 'brightness(0.85) saturate(1.2)' : 'none'
+                  }}
                   className="absolute inset-0 w-full h-full rounded-lg object-fill pointer-events-none transition-opacity duration-75"
                 />
               )}
 
+              {/* Dynamic Interactive Hotspot Glow when user clicks */}
+              {customHotspot && (
+                <div
+                  style={{
+                    left: `${customHotspot.centerX * 100}%`,
+                    top: `${customHotspot.centerY * 100}%`,
+                    transform: 'translate(-50%, -50%)',
+                    width: `${customHotspot.width * 140}%`,
+                    height: `${customHotspot.height * 140}%`,
+                  }}
+                  className="absolute rounded-full pointer-events-none bg-gradient-to-r from-red-600/70 via-amber-500/50 to-transparent blur-md animate-pulse"
+                />
+              )}
+
               {/* Pixel-Perfect Bounding Boxes */}
-              {showBoxes && !isClean && boundingBoxes.map((box, idx) => (
+              {showBoxes && !isClean && activeBoxes.map((box, idx) => (
                 <div
                   key={idx}
                   style={{
@@ -93,10 +142,10 @@ export default function GradCamViewer({
                     width: `${box.width * 100}%`,
                     height: `${box.height * 100}%`,
                   }}
-                  className="absolute border-2 border-dashed border-cyan-400 bg-cyan-400/15 rounded pointer-events-none transition-all shadow-[0_0_15px_rgba(6,182,212,0.8)] z-10"
+                  className="absolute border-2 border-dashed border-cyan-400 bg-cyan-400/20 rounded pointer-events-none transition-all shadow-[0_0_20px_rgba(6,182,212,0.9)] z-10"
                 >
                   <span className="absolute -top-6 left-0 bg-cyan-500 text-slate-950 text-[10px] font-black uppercase px-2 py-0.5 rounded tracking-wide shadow-md whitespace-nowrap">
-                    {box.label || `Damage Zone ${(box.confidence * 100).toFixed(0)}%`}
+                    {box.label || `Damage Zone`}
                   </span>
                 </div>
               ))}
@@ -113,9 +162,11 @@ export default function GradCamViewer({
               <div className="absolute bottom-3 left-3 bg-slate-950/85 backdrop-blur-md px-2.5 py-1 rounded-md border border-slate-700 text-[11px] font-mono text-slate-300 flex items-center gap-1.5">
                 <Flame className="w-3 h-3 text-red-400" />
                 Opacity: <span className="text-cyan-400 font-bold">{opacity}%</span>
+                {customHotspot && <span className="text-[10px] text-amber-400 ml-1.5 font-sans">(Custom Pinpoint)</span>}
               </div>
             </div>
           </div>
+
 
           {/* Interactive Thermal Opacity Scrollbar / Slider */}
           {!isClean && (
