@@ -1,0 +1,12 @@
+﻿AutoInspect_AI_Deliverable.zip
+AutoInspect_AI_Source_and_Model.zip
+ml_training/
+*.pth
+*.zip
+*.tar.gz
+*.sqlite
+*.sqlite3
+*.db
+backend/static/uploads/*
+backend/static/gradcam/*
+backend/static/reports/*
