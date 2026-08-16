@@ -295,26 +295,31 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
         const isClean = damageType === 'no_damage';
         const hasDamage = !isClean;
 
-        // Step 3: Find true centroid and damage bounding envelope
+        // Step 3: Find core damage cluster (Top 30% intensity within local neighborhood of peak)
+        const peakThreshold = maxScore * 0.65;
         let weightedSumX = 0;
         let weightedSumY = 0;
         let weightTotal = 0;
 
-        const threshold = maxScore * 0.45;
-        for (let gy = 1; gy < gridY - 1; gy++) {
-          for (let gx = 1; gx < gridX - 1; gx++) {
+        let clusterMinGX = bestGX;
+        let clusterMaxGX = bestGX;
+        let clusterMinGY = bestGY;
+        let clusterMaxGY = bestGY;
+
+        for (let gy = Math.max(1, bestGY - 3); gy <= Math.min(gridY - 2, bestGY + 3); gy++) {
+          for (let gx = Math.max(1, bestGX - 3); gx <= Math.min(gridX - 2, bestGX + 3); gx++) {
             const score = cellScores[gy * gridX + gx];
-            if (score > threshold) {
+            if (score >= peakThreshold) {
               const cx = (gx + 0.5) * cellW;
               const cy = (gy + 0.5) * cellH;
               weightedSumX += cx * score;
               weightedSumY += cy * score;
               weightTotal += score;
 
-              minDamX = Math.min(minDamX, gx * cellW);
-              maxDamX = Math.max(maxDamX, (gx + 1) * cellW);
-              minDamY = Math.min(minDamY, gy * cellH);
-              maxDamY = Math.max(maxDamY, (gy + 1) * cellH);
+              clusterMinGX = Math.min(clusterMinGX, gx);
+              clusterMaxGX = Math.max(clusterMaxGX, gx);
+              clusterMinGY = Math.min(clusterMinGY, gy);
+              clusterMaxGY = Math.max(clusterMaxGY, gy);
             }
           }
         }
@@ -332,16 +337,26 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
         let boundingBoxes = [];
 
         if (hasDamage) {
-          const rawBoxW = Math.max(cellW * 2.2, maxDamX - minDamX);
-          const rawBoxH = Math.max(cellH * 2.2, maxDamY - minDamY);
-          const radius = Math.max(rawBoxW, rawBoxH) * 0.75;
+          // Compute tight, compact bounding envelope around the core defect
+          const spanW = (clusterMaxGX - clusterMinGX + 1.2) * cellW;
+          const spanH = (clusterMaxGY - clusterMinGY + 1.2) * cellH;
+
+          // Clamp bounding box to realistic defect bounds (12% to 32% of car dimension)
+          const normW = Math.min(0.32, Math.max(0.12, (spanW * 1.1) / w));
+          const normH = Math.min(0.28, Math.max(0.10, (spanH * 1.1) / h));
+
+          const normX = Math.max(0.02, Math.min(0.98 - normW, (damageCenterX / w) - (normW / 2)));
+          const normY = Math.max(0.02, Math.min(0.98 - normH, (damageCenterY / h) - (normH / 2)));
+
+          // Concentrated thermal hotspot radius matching the compact box
+          const radius = Math.max(normW * w, normH * h) * 0.72;
 
           // Draw JET thermal gradient at the damage hotspot
           const radGrad = heatCtx.createRadialGradient(damageCenterX, damageCenterY, 0, damageCenterX, damageCenterY, radius);
-          radGrad.addColorStop(0.0, 'rgba(255, 0, 0, 0.88)');
-          radGrad.addColorStop(0.35, 'rgba(255, 170, 0, 0.72)');
-          radGrad.addColorStop(0.65, 'rgba(0, 230, 255, 0.45)');
-          radGrad.addColorStop(0.88, 'rgba(0, 50, 255, 0.20)');
+          radGrad.addColorStop(0.0, 'rgba(255, 0, 0, 0.90)');
+          radGrad.addColorStop(0.30, 'rgba(255, 160, 0, 0.75)');
+          radGrad.addColorStop(0.60, 'rgba(0, 220, 255, 0.45)');
+          radGrad.addColorStop(0.85, 'rgba(0, 40, 255, 0.15)');
           radGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
 
           heatCtx.save();
@@ -349,25 +364,18 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
           heatCtx.fillRect(0, 0, w, h);
           heatCtx.restore();
 
-          // Calculate precise normalized bounding box coordinates
-          const padW = rawBoxW * 0.15;
-          const padH = rawBoxH * 0.15;
-          const bLeft = Math.max(0.02, (damageCenterX - (rawBoxW / 2) - padW) / w);
-          const bTop = Math.max(0.02, (damageCenterY - (rawBoxH / 2) - padH) / h);
-          const bWidth = Math.min(0.96 - bLeft, (rawBoxW + 2 * padW) / w);
-          const bHeight = Math.min(0.96 - bTop, (rawBoxH + 2 * padH) / h);
-
           boundingBoxes = [
             {
-              x: Number(bLeft.toFixed(3)),
-              y: Number(bTop.toFixed(3)),
-              width: Number(bWidth.toFixed(3)),
-              height: Number(bHeight.toFixed(3)),
+              x: Number(normX.toFixed(3)),
+              y: Number(normY.toFixed(3)),
+              width: Number(normW.toFixed(3)),
+              height: Number(normH.toFixed(3)),
               label: `${damageType.toUpperCase().replace('_', ' ')} ZONE`,
               confidence: Number(confidence.toFixed(2))
             }
           ];
         }
+
 
         // Probability map
         const probabilities = {
