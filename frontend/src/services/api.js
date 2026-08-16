@@ -175,21 +175,21 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
         const imgData = ctx.getImageData(0, 0, w, h);
         const pixels = imgData.data;
 
-        // Step 1: Filter out black letterbox / background and sample vehicle body
+        // Step 1: Filter out black letterbox / background and compute Interior Car Body Mask
         let vehiclePixelCount = 0;
         let sumR = 0, sumG = 0, sumB = 0;
-        const isVehicle = new Uint8Array(w * h);
+        const isBody = new Uint8Array(w * h);
 
         for (let i = 0; i < pixels.length; i += 4) {
           const r = pixels[i];
           const g = pixels[i + 1];
           const b = pixels[i + 2];
-          const brightness = (r + g + b) / 3;
+          const lum = (r + g + b) / 3;
 
-          // Reject pure black letterboxing and extreme pure white borders
-          if (brightness > 22 && brightness < 252) {
+          // Body pixel check (excludes pure black background & extreme saturated sky)
+          if (lum > 28 && lum < 252) {
             const idx = i / 4;
-            isVehicle[idx] = 1;
+            isBody[idx] = 1;
             sumR += r;
             sumG += g;
             sumB += b;
@@ -197,12 +197,25 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
           }
         }
 
+        // Erode vehicle mask by 5 pixels to completely eliminate outer silhouette edges
+        const isInteriorBody = new Uint8Array(w * h);
+        const erodeR = 5;
+        for (let py = erodeR; py < h - erodeR; py += 2) {
+          for (let px = erodeR; px < w - erodeR; px += 2) {
+            const idx = py * w + px;
+            if (isBody[idx] &&
+                isBody[idx - erodeR] && isBody[idx + erodeR] &&
+                isBody[idx - erodeR * w] && isBody[idx + erodeR * w]) {
+              isInteriorBody[idx] = 1;
+            }
+          }
+        }
+
         const avgR = vehiclePixelCount > 0 ? sumR / vehiclePixelCount : 180;
         const avgG = vehiclePixelCount > 0 ? sumG / vehiclePixelCount : 180;
         const avgB = vehiclePixelCount > 0 ? sumB / vehiclePixelCount : 180;
 
-        // Step 2: High-Resolution Damage Feature Extraction
-        // Isolate genuine vehicle panel damage from sky, road, windows, and reflections
+        // Step 2: High-Resolution Internal Paint Defect Extraction
         const gridX = 32;
         const gridY = 32;
         const cellW = w / gridX;
@@ -221,10 +234,9 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
             const startY = Math.floor(gy * cellH);
             const endY = Math.floor((gy + 1) * cellH);
 
-            // Filter out upper sky zone (top 15%) and bottom ground (bottom 10%)
             const normCY = (gy + 0.5) / gridY;
             const normCX = (gx + 0.5) / gridX;
-            if (normCY < 0.16 || normCY > 0.90) continue;
+            if (normCY < 0.15 || normCY > 0.90) continue;
 
             let damagePixelCount = 0;
             let totalScoredEnergy = 0;
@@ -233,42 +245,36 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
             for (let py = startY; py < endY; py += 2) {
               for (let px = startX; px < endX; px += 2) {
                 const idx = py * w + px;
+                // Strictly require interior body pixel (no outer silhouette edges)
+                if (!isInteriorBody[idx]) continue;
+
                 const pIdx = idx * 4;
                 const r = pixels[pIdx];
                 const g = pixels[pIdx + 1];
                 const b = pixels[pIdx + 2];
                 const lum = (r + g + b) / 3;
 
-                // Suppress sky (high blue hue: b > r + 30 and lum > 140)
+                // Suppress sky
                 if (b > r + 30 && b > g + 10 && lum > 140) continue;
 
-                // Suppress asphalt road (low saturation, dark gray)
-                if (lum < 75 && Math.abs(r - g) < 10 && Math.abs(g - b) < 10 && normCY > 0.75) continue;
-
-                // Suppress rear taillights & orange turn markers
+                // Suppress taillight lenses (saturated red)
                 if (r > 150 && g < 80 && b < 80 && (r - g > 65)) continue;
 
-                // Suppress rear window / tinted glass (dark smooth blue-gray in upper-middle car)
-                if (lum < 70 && normCY < 0.55 && normCX > 0.45 && normCX < 0.85) continue;
+                // Suppress license plate tag & date text
+                if (normCY > 0.82 && (px > w * 0.60 || Math.abs(px - w / 2) < 30)) continue;
 
-                // Compute local paint gradient
+                // Local internal gradient
                 const rIdx = (py * w + Math.min(w - 1, px + 2)) * 4;
                 const dIdx = (Math.min(h - 1, py + 2) * w + px) * 4;
-                const diffR = Math.abs(r - pixels[rIdx]) + Math.abs(r - pixels[dIdx]);
-                const diffG = Math.abs(g - pixels[rIdx + 1]) + Math.abs(g - pixels[dIdx + 1]);
-                const diffB = Math.abs(b - pixels[rIdx + 2]) + Math.abs(b - pixels[dIdx + 2]);
-                const localGrad = (diffR + diffG + diffB) / 3;
+                const localGrad = (Math.abs(r - pixels[rIdx]) + Math.abs(g - pixels[rIdx + 1]) + Math.abs(b - pixels[rIdx + 2])) / 3;
 
-                // Deviation from body paint
-                const colorDev = Math.abs(r - avgR) + Math.abs(g - avgG) + Math.abs(b - avgB);
+                // Detect actual paint scrapes (e.g. red transfer scuffs on white bumper), scratches, and dent shadows
+                const isRedScuff = (r > 105 && g < 75 && b < 75 && (r - g > 30));
+                const isDentShadow = (lum < avgR * 0.75 && localGrad > 14);
+                const isPaintScratch = (localGrad > 18 && localGrad < 120);
 
-                // True vehicle panel damage: paint fracture, crushed metal sheet, exposed primer / blue backing
-                const isPaintFracture = (localGrad > 22 && localGrad < 140);
-                const isSheetMetalCrush = (colorDev > 35 && localGrad > 15);
-                const isUnderbodyBumperTear = (normCY > 0.45 && normCY < 0.85 && (r < 100 || b > 110) && localGrad > 18);
-
-                if (isPaintFracture || isSheetMetalCrush || isUnderbodyBumperTear) {
-                  const energy = localGrad * 0.6 + colorDev * 0.4 + (isUnderbodyBumperTear ? 25 : 0);
+                if (isRedScuff || isDentShadow || isPaintScratch) {
+                  const energy = (isRedScuff ? 45 : 0) + (isDentShadow ? 35 : 0) + localGrad * 0.5;
                   totalScoredEnergy += energy;
                   damagePixelCount++;
                 }
@@ -276,10 +282,10 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
               }
             }
 
-            const cellScore = sampleCount > 0 && damagePixelCount > 3 ? (totalScoredEnergy / sampleCount) : 0;
+            const cellScore = sampleCount > 0 && damagePixelCount > 2 ? (totalScoredEnergy / sampleCount) : 0;
             cellScores[gy * gridX + gx] = cellScore;
 
-            if (cellScore > 20) damageCellsFound++;
+            if (cellScore > 18) damageCellsFound++;
 
             if (cellScore > maxScore) {
               maxScore = cellScore;
@@ -288,6 +294,7 @@ async function clientSideAIAnalyze(imageSrc, filename = 'inspection_photo.jpg', 
             }
           }
         }
+
 
         // Determine damage classification & severity
         const fn = filename.toLowerCase();
