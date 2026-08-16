@@ -56,7 +56,11 @@ export default function ResultsCard({ result, onReset }) {
 
   const handleDownloadPdf = () => {
     const url = getReportPdfUrl(id);
-    window.open(url, '_blank');
+    if (url.startsWith('http')) {
+      window.open(url, '_blank');
+    } else {
+      window.print();
+    }
   };
 
   return (
